@@ -81,7 +81,6 @@ class ReplyLog(AsyncAttrs, Base):
 
 
 async def init_db():
-    # 1. Прямая синхронная миграция существующей SQLite базы (добавляем username, если нет)
     if DB_PATH.exists():
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -95,7 +94,6 @@ async def init_db():
         except Exception as e:
             print(f"Migration error: {e}")
 
-    # 2. Создание всех остальных таблиц SQLAlchemy
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -434,7 +432,6 @@ async def get_all_user_ids() -> List[int]:
 
 
 async def get_all_users_admin() -> List[dict]:
-    """Возвращает подробный список всех пользователей со статистикой для админ-панели"""
     async with async_session() as session:
         res_users = await session.execute(select(User).order_by(User.id.asc()))
         users = res_users.scalars().all()
