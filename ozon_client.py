@@ -40,9 +40,6 @@ class OzonClient:
             return False, f"Сетевая ошибка Ozon: {e}"
 
     async def get_unprocessed_reviews(self, limit: int = 50, last_id: str = "") -> Dict[str, Any]:
-        """
-        Получение списка новых (неотвеченных) отзывов с сортировкой от свежих к старым.
-        """
         url = f"{self.BASE_URL}/v1/review/list"
         payload = {
             "limit": max(20, min(limit, 100)),
@@ -58,7 +55,6 @@ class OzonClient:
                     raise OzonAPIError("Лимит запросов Ozon превышен (429)", status_code=429)
 
                 if resp.status != 200:
-                    # Если Ozon по какой-то причине отклоняет статус UNPROCESSED, пробуем просто DESC
                     payload.pop("status", None)
                     async with session.post(url, headers=self.headers, json=payload, timeout=30) as retry_resp:
                         if retry_resp.status != 200:
@@ -68,7 +64,6 @@ class OzonClient:
                 else:
                     data = await resp.json()
 
-                # Ozon может возвращать список как в корне data['reviews'], так и в data['result']['reviews']
                 reviews = data.get("reviews") or data.get("result", {}).get("reviews", [])
                 last_id_val = data.get("last_id") or data.get("result", {}).get("last_id", "")
                 has_next_val = data.get("has_next") or data.get("result", {}).get("has_next", False)
@@ -79,27 +74,56 @@ class OzonClient:
                     "has_next": has_next_val
                 }
 
-    async def get_product_names(self, skus: List[int]) -> Dict[int, str]:
+    async def get_product_names(self, skus: List[int]) -> Dict[Any, str]:
         if not skus:
             return {}
 
-        url = f"{self.BASE_URL}/v2/product/info/list"
-        payload = {"sku": [int(s) for s in skus]}
+        clean_skus = list(set(int(s) for s in skus if s))
         names_map = {}
+
+        url_v3 = f"{self.BASE_URL}/v3/product/info/list"
+        payload_v3 = {"sku": clean_skus}
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=20) as resp:
+                async with session.post(url_v3, headers=self.headers, json=payload_v3, timeout=15) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        items = data.get("result", {}).get("items", [])
+                        items = data.get("items") or data.get("result", {}).get("items", [])
                         for item in items:
                             sku = item.get("sku")
                             name = item.get("name")
                             if sku and name:
-                                names_map[sku] = name
+                                names_map[int(sku)] = name
+                                names_map[str(sku)] = name
+                        if names_map:
+                            return names_map
+                    else:
+                        err_text = await resp.text()
+                        logging.warning(f"Ozon v3 get_product_names warning ({resp.status}): {err_text[:200]}")
         except Exception as e:
-            logging.error(f"Ozon get_product_names error: {e}")
+            logging.warning(f"Ozon v3 get_product_names exception: {e}")
+
+        url_v2 = f"{self.BASE_URL}/v2/product/info/list"
+        payload_v2 = {"sku": clean_skus}
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url_v2, headers=self.headers, json=payload_v2, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        items = data.get("result", {}).get("items", []) or data.get("items", [])
+                        for item in items:
+                            sku = item.get("sku")
+                            name = item.get("name")
+                            if sku and name:
+                                names_map[int(sku)] = name
+                                names_map[str(sku)] = name
+                    else:
+                        err_text = await resp.text()
+                        logging.error(f"Ozon v2 get_product_names error ({resp.status}): {err_text[:200]}")
+        except Exception as e:
+            logging.error(f"Ozon v2 get_product_names exception: {e}")
 
         return names_map
 
