@@ -225,6 +225,16 @@ async def delete_shop(user_id: int, shop_id: int) -> bool:
         shop = await session.get(Shop, shop_id)
         if not shop or shop.user_id != user_id:
             return False
+        
+        # Удаляем связанные логи ответов, чтобы не нарушать целостность ForeignKey
+        await session.execute(
+            select(ReplyLog).where(ReplyLog.shop_id == shop_id)
+        )
+        logs_stmt = select(ReplyLog).where(ReplyLog.shop_id == shop_id)
+        logs_res = await session.execute(logs_stmt)
+        for log in logs_res.scalars().all():
+            await session.delete(log)
+
         await session.delete(shop)
         await session.commit()
         return True
