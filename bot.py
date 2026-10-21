@@ -762,8 +762,9 @@ async def cb_set_tone(cb: CallbackQuery):
     _, _, shop_id, tone_key = cb.data.split("_")
     await update_shop(int(shop_id), tone_style=tone_key)
     await cb.answer(f"Стиль изменен на: {TONE_LABELS.get(tone_key)}")
-    cb.data = f"shop_view_{shop_id}"
-    await cb_shop_view(cb)
+
+    fake_cb = cb.model_copy(update={"data": f"shop_view_{shop_id}"})
+    await cb_shop_view(fake_cb)
 
 @router.callback_query(F.data.startswith("edit_sig_"))
 async def cb_edit_signature(cb: CallbackQuery, state: FSMContext):
