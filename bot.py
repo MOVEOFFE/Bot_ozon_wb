@@ -244,12 +244,18 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
                 continue
 
             target_reviews.append(r)
-            if len(target_reviews) >= 15:
+            # Набираем рабочую пачку в 50 отзывов за сеанс
+            if len(target_reviews) >= 50:
                 stop_paging = True
                 break
 
-        if stop_paging or not data.get("has_next"):
+        # Прерываем пагинацию, ТОЛЬКО если дошли до старых дат или закончились отзывы в Ozon
+        if not data.get("has_next") or (shop.max_age_days > 0 and stop_paging and len(target_reviews) < 50):
             break
+            
+        if stop_paging:
+            break
+
         last_id = data.get("last_id", "")
 
     if not target_reviews:
@@ -324,16 +330,19 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
         if not await interruptible_sleep(45, shop.id):
             return True
 
-    if replied_in_cycle > 0:
+   if replied_in_cycle > 0:
         try:
-            await bot.send_message(
-                shop.user_id,
-                f"💤 **Отзывы закончились, ушел спать!**\n\n"
-                f"🏪 Магазин: **[🔵 Ozon] {shop.name}**\n"
-                f"✅ Отвечено за сеанс: **{replied_in_cycle} шт.**\n\n"
-                f"Как только появятся новые отзывы, я сразу продолжу свою работу.",
-                parse_mode="Markdown"
-            )
+            # Отправляем сообщение только если реально нет следующей страницы отзывов
+            has_more = bool(last_id and data.get("has_next"))
+            if not has_more:
+                await bot.send_message(
+                    shop.user_id,
+                    f"💤 **Отзывы закончились, ушел спать!**\n\n"
+                    f"🏪 Магазин: **[🔵 Ozon] {shop.name}**\n"
+                    f"✅ Отвечено за сеанс: **{replied_in_cycle} шт.**\n\n"
+                    f"Как только появятся новые отзывы, я сразу продолжу свою работу.",
+                    parse_mode="Markdown"
+                )
         except Exception:
             pass
 
