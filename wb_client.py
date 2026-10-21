@@ -85,16 +85,37 @@ class WildberriesClient:
             "text": text.strip()
         }
 
-        await self._rate_limit_throttle(30.0)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, headers=self.headers, json=payload, timeout=30) as resp:
-                    if resp.status in (200, 204):
-                        return
+        for attempt in range(1, 4):
+            await self._rate_limit_throttle(25.0)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=self.headers, json=payload, timeout=30) as resp:
+                        if resp.status in (200, 204):
+                            return
 
-                    err_text = await resp.text()
-                    retry_after = resp.headers.get("Retry-After", "не указан")
-                    logging.warning(f"WB Publish API статус {resp.status} (Retry-After: {retry_after}): {err_text[:200]}")
-                    raise WBAPIError(f"Ошибка публикации ответа WB ({resp.status}): {err_text[:150]}", status_code=resp.status)
-        except aiohttp.ClientError as e:
-            raise WBAPIError(f"Сетевая ошибка WB при отправке ответа: {e}")
+                        if resp.status == 429:
+                            # Читаем официальный заголовок WB о времени блокировки
+                            wb_retry = resp.headers.get("X-Ratelimit-Retry") or resp.headers.get("Retry-After")
+                            try:
+                                wait_sec = int(wb_retry) + 2 if wb_retry else (40 * attempt)
+                            except (ValueError, TypeError):
+                                wait_sec = 40 * attempt
+
+                            err_text = await resp.text()
+                            logging.warning(
+                                f"WB 429 при публикации (X-Ratelimit-Retry: {wb_retry}, ждем {wait_sec}с, попытка {attempt}/3). Ответ WB: {err_text[:120]}"
+                            )
+                            await asyncio.sleep(wait_sec)
+                            continue
+
+                        err_text = await resp.text()
+                        raise WBAPIError(
+                            f"Ошибка публикации ответа WB ({resp.status}): {err_text[:200]}",
+                            status_code=resp.status
+                        )
+            except aiohttp.ClientError as e:
+                if attempt == 3:
+                    raise WBAPIError(f"Сетевая ошибка WB при отправке ответа: {e}")
+                await asyncio.sleep(10)
+
+        raise WBAPIError("Лимит запросов WB при отправке ответа (429): исчерпаны все попытки", status_code=429)
