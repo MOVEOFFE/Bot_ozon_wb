@@ -205,6 +205,7 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
 
     target_reviews = []
     last_id = ""
+    has_next_page = False
 
     for _ in range(50):
         try:
@@ -244,16 +245,12 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
                 continue
 
             target_reviews.append(r)
-            # Набираем рабочую пачку в 50 отзывов за сеанс
             if len(target_reviews) >= 50:
                 stop_paging = True
                 break
 
-        # Прерываем пагинацию, ТОЛЬКО если дошли до старых дат или закончились отзывы в Ozon
-        if not data.get("has_next") or (shop.max_age_days > 0 and stop_paging and len(target_reviews) < 50):
-            break
-            
-        if stop_paging:
+        has_next_page = bool(data.get("has_next"))
+        if stop_paging or not has_next_page:
             break
 
         last_id = data.get("last_id", "")
@@ -322,7 +319,6 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
             replied_in_cycle += 1
             logging.info(f"[{shop.name}] Ответ Ozon опубликован на отзыв {rev_id} ({rev['rating']}⭐️)")
 
-            # Перевод отзыва во вкладку "Обработанные" в ЛК Ozon
             await ozon.change_review_status(review_id=rev_id, status="PROCESSED")
         except Exception as e:
             logging.error(f"[{shop.name}] Ошибка публикации ответа Ozon: {e}")
@@ -330,19 +326,16 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
         if not await interruptible_sleep(45, shop.id):
             return True
 
-   if replied_in_cycle > 0:
+    if replied_in_cycle > 0 and not has_next_page:
         try:
-            # Отправляем сообщение только если реально нет следующей страницы отзывов
-            has_more = bool(last_id and data.get("has_next"))
-            if not has_more:
-                await bot.send_message(
-                    shop.user_id,
-                    f"💤 **Отзывы закончились, ушел спать!**\n\n"
-                    f"🏪 Магазин: **[🔵 Ozon] {shop.name}**\n"
-                    f"✅ Отвечено за сеанс: **{replied_in_cycle} шт.**\n\n"
-                    f"Как только появятся новые отзывы, я сразу продолжу свою работу.",
-                    parse_mode="Markdown"
-                )
+            await bot.send_message(
+                shop.user_id,
+                f"💤 **Отзывы закончились, ушел спать!**\n\n"
+                f"🏪 Магазин: **[🔵 Ozon] {shop.name}**\n"
+                f"✅ Отвечено за сеанс: **{replied_in_cycle} шт.**\n\n"
+                f"Как только появятся новые отзывы, я сразу продолжу свою работу.",
+                parse_mode="Markdown"
+            )
         except Exception:
             pass
 
