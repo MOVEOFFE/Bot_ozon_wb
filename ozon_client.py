@@ -145,3 +145,21 @@ class OzonClient:
                         f"Ошибка публикации ответа Ozon ({resp.status}): {err_text[:200]}",
                         status_code=resp.status
                     )
+
+    async def change_review_status(self, review_id: str, status: str = "PROCESSED"):
+        """
+        Переводит статус отзыва в Ozon (PROCESSED — обработан).
+        """
+        url = f"{self.BASE_URL}/v1/review/change-status"
+        payload = {
+            "review_ids": [review_id],
+            "status": status
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, headers=self.headers, json=payload, timeout=15) as resp:
+                    if resp.status not in (200, 204):
+                        err_text = await resp.text()
+                        logging.warning(f"Не удалось сменить статус отзыва Ozon {review_id} на {status}: {err_text[:150]}")
+        except Exception as e:
+            logging.warning(f"Ошибка запроса change_review_status Ozon ({review_id}): {e}")
