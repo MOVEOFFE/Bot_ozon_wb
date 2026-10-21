@@ -923,7 +923,8 @@ async def cb_confirm_delete(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("do_delete_"))
 async def cb_do_delete(cb: CallbackQuery):
     shop_id = int(cb.data.split("_")[2])
-    await delete_shop(shop_id)
+    # Передаем и user_id, и shop_id:
+    await delete_shop(user_id=cb.from_user.id, shop_id=shop_id)
     await cb.answer("Магазин успешно удален")
     await show_shops_catalog(cb.from_user.id, cb.message, is_edit=True)
 
