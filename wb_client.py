@@ -23,14 +23,14 @@ class WildberriesClient:
             "Accept": "application/json"
         }
 
-    async def _rate_limit_throttle(self):
+    async def _rate_limit_throttle(self, min_interval: float = 20.0):
         elapsed = time.time() - WildberriesClient._last_request_time
-        if elapsed < 15.0:
-            await asyncio.sleep(15.0 - elapsed)
+        if elapsed < min_interval:
+            await asyncio.sleep(min_interval - elapsed)
         WildberriesClient._last_request_time = time.time()
 
     async def verify_credentials(self) -> Tuple[bool, str]:
-        await self._rate_limit_throttle()
+        await self._rate_limit_throttle(5.0)
         url = f"{self.BASE_URL}/api/v1/feedbacks/count-unanswered"
         try:
             async with aiohttp.ClientSession() as session:
@@ -47,7 +47,7 @@ class WildberriesClient:
             return False, f"Сетевая ошибка WB: {e}"
 
     async def get_unprocessed_feedbacks(self, take: int = 30) -> List[Dict[str, Any]]:
-        await self._rate_limit_throttle()
+        await self._rate_limit_throttle(15.0)
         url = f"{self.BASE_URL}/api/v1/feedbacks"
         params = {
             "isAnswered": "false",
@@ -75,27 +75,35 @@ class WildberriesClient:
                 return []
 
     async def publish_reply(self, feedback_id: str, text: str):
-        """
-        Публикация ответа на отзыв Wildberries.
-        Эндпоинт по документации WB: POST https://feedbacks-api.wildberries.ru/api/v1/feedbacks/answer
-        """
-        await self._rate_limit_throttle()
         url = f"{self.BASE_URL}/api/v1/feedbacks/answer"
         payload = {
             "id": str(feedback_id).strip(),
             "text": text.strip()
         }
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=self.headers, json=payload, timeout=30) as resp:
-                if resp.status == 429:
-                    raise WBAPIError("Лимит запросов WB при отправке ответа (429)", status_code=429)
+        # Выполняем до 3 попыток отправки с ожиданием при 429
+        for attempt in range(1, 4):
+            await self._rate_limit_throttle(22.0)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=self.headers, json=payload, timeout=30) as resp:
+                        if resp.status in (200, 204):
+                            return
 
-                if resp.status in (200, 204):
-                    return
+                        if resp.status == 429:
+                            wait_sec = 35 * attempt
+                            logging.warning(f"WB вернул 429 при публикации. Пауза {wait_sec} сек (попытка {attempt}/3)...")
+                            await asyncio.sleep(wait_sec)
+                            continue
 
-                err_text = await resp.text()
-                raise WBAPIError(
-                    f"Ошибка публикации ответа WB ({resp.status}): {err_text[:200]}",
-                    status_code=resp.status
-                )
+                        err_text = await resp.text()
+                        raise WBAPIError(
+                            f"Ошибка публикации ответа WB ({resp.status}): {err_text[:200]}",
+                            status_code=resp.status
+                        )
+            except aiohttp.ClientError as e:
+                if attempt == 3:
+                    raise WBAPIError(f"Сетевая ошибка WB при отправке ответа: {e}")
+                await asyncio.sleep(10)
+
+        raise WBAPIError("Лимит запросов WB при отправке ответа (429): превышено число попыток", status_code=429)
