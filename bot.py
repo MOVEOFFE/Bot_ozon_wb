@@ -1100,6 +1100,7 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     dp = Dispatcher()
+    dp.include_router(admin_router)
     dp.include_router(router)
 
     asyncio.create_task(background_reviews_worker(bot))
