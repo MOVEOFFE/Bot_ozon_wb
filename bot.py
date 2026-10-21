@@ -388,7 +388,7 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
                 continue
 
         target_feedbacks.append(f)
-        if len(target_feedbacks) >= 15:
+        if len(target_feedbacks) >= 50:
             break
 
     if not target_feedbacks:
@@ -449,7 +449,7 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
         if not await interruptible_sleep(20, shop.id):
             return True
 
-    if replied_in_cycle > 0:
+    if replied_in_cycle > 0 and len(feedbacks) < 30:
         try:
             await bot.send_message(
                 shop.user_id,
