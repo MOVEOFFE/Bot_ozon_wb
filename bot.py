@@ -315,6 +315,9 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
             await save_reply_log(shop.id, "ozon", p_name, rev["rating"], raw_text, reply)
             replied_in_cycle += 1
             logging.info(f"[{shop.name}] Ответ Ozon опубликован на отзыв {rev_id} ({rev['rating']}⭐️)")
+
+            # Перевод отзыва во вкладку "Обработанные" в ЛК Ozon
+            await ozon.change_review_status(review_id=rev_id, status="PROCESSED")
         except Exception as e:
             logging.error(f"[{shop.name}] Ошибка публикации ответа Ozon: {e}")
 
