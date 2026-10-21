@@ -1,8 +1,9 @@
 import os
+import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple, Optional
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger, select
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, BigInteger, select, func
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncAttrs
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -22,6 +23,7 @@ class User(AsyncAttrs, Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(BigInteger, unique=True, index=True, nullable=False)
+    username = Column(String, nullable=True)
     is_admin = Column(Boolean, default=False)
     
     plan = Column(String, default="trial")
@@ -79,11 +81,26 @@ class ReplyLog(AsyncAttrs, Base):
 
 
 async def init_db():
+    # 1. Прямая синхронная миграция существующей SQLite базы (добавляем username, если нет)
+    if DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(users)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if "username" not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
+                conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Migration error: {e}")
+
+    # 2. Создание всех остальных таблиц SQLAlchemy
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
-async def get_or_create_user(user_id: int, is_admin: bool = False) -> User:
+async def get_or_create_user(user_id: int, is_admin: bool = False, username: str = None) -> User:
     async with async_session() as session:
         stmt = select(User).where(User.user_id == user_id)
         result = await session.execute(stmt)
@@ -91,7 +108,8 @@ async def get_or_create_user(user_id: int, is_admin: bool = False) -> User:
         
         if not user:
             user = User(
-                user_id=user_id, 
+                user_id=user_id,
+                username=username,
                 is_admin=is_admin, 
                 replies_quota_left=99999 if is_admin else 50, 
                 plan="unlimited" if is_admin else "trial"
@@ -100,12 +118,17 @@ async def get_or_create_user(user_id: int, is_admin: bool = False) -> User:
             await session.commit()
             await session.refresh(user)
         else:
-            # Если статус админа изменился в конфиге — обновляем существующую запись в базе
+            updated = False
+            if username and user.username != username:
+                user.username = username
+                updated = True
             if user.is_admin != is_admin:
                 user.is_admin = is_admin
                 if is_admin:
                     user.plan = "unlimited"
                     user.replies_quota_left = 99999
+                updated = True
+            if updated:
                 await session.commit()
                 await session.refresh(user)
                 
@@ -223,18 +246,24 @@ async def save_reply_log(shop_id: int, marketplace: str, product_name: str, rati
         await session.commit()
 
 
-async def get_recent_logs(shop_id: int, limit: int = 5) -> List[ReplyLog]:
+async def get_recent_logs(shop_id: int, limit: int = 5, offset: int = 0) -> List[ReplyLog]:
     async with async_session() as session:
-        stmt = select(ReplyLog).where(ReplyLog.shop_id == shop_id).order_by(ReplyLog.id.desc()).limit(limit)
+        stmt = (
+            select(ReplyLog)
+            .where(ReplyLog.shop_id == shop_id)
+            .order_by(ReplyLog.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
 
 async def get_shop_reply_count(shop_id: int) -> int:
     async with async_session() as session:
-        stmt = select(ReplyLog).where(ReplyLog.shop_id == shop_id)
+        stmt = select(func.count(ReplyLog.id)).where(ReplyLog.shop_id == shop_id)
         result = await session.execute(stmt)
-        return len(result.scalars().all())
+        return result.scalar() or 0
 
 
 async def check_shop_creation_allowed(user_id: int) -> Tuple[bool, int, int]:
@@ -242,7 +271,6 @@ async def check_shop_creation_allowed(user_id: int) -> Tuple[bool, int, int]:
     shops = await get_user_shops(user_id, include_archived=False)
     count = len(shops)
 
-    # Если пользователь админ или у него тариф безлимит — лимитов нет
     if user.is_admin or user.plan == "unlimited" or user_id in [590568180]:
         return True, count, 999
 
@@ -403,3 +431,29 @@ async def get_all_user_ids() -> List[int]:
         stmt = select(User.user_id)
         res = await session.execute(stmt)
         return [row[0] for row in res.all()]
+
+
+async def get_all_users_admin() -> List[dict]:
+    """Возвращает подробный список всех пользователей со статистикой для админ-панели"""
+    async with async_session() as session:
+        res_users = await session.execute(select(User).order_by(User.id.asc()))
+        users = res_users.scalars().all()
+
+        user_list = []
+        for u in users:
+            res_shops = await session.execute(
+                select(func.count(Shop.id)).where(Shop.user_id == u.user_id, Shop.is_archived == False)
+            )
+            shops_cnt = res_shops.scalar() or 0
+
+            user_list.append({
+                "user_id": u.user_id,
+                "username": getattr(u, "username", None),
+                "plan": u.plan,
+                "replies_quota_left": u.replies_quota_left,
+                "is_admin": u.is_admin,
+                "shops_count": shops_cnt,
+                "created_at": u.created_at
+            })
+
+        return user_list
