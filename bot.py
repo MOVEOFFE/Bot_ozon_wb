@@ -971,18 +971,18 @@ async def process_shop_name(message: Message, state: FSMContext):
     if mp == "ozon":
         await state.set_state(AddShopStates.ozon_client_id)
         await message.answer(
-            "🔑 **Введите Client ID от API Ozon:**\n\n"
+            "🔑 Введите Client ID от API Ozon:\n\n"
             "Его можно скопировать в:\n"
-            "**ЛК Ozon Seller** → **Настройки** → **API ключи**",
+            "ЛК Ozon Seller → Настройки → Seller API → Client ID",
         )
     else:
         await state.set_state(AddShopStates.wb_api_token)
         await message.answer(
-            "🔑 **Введите API Токен Wildberries:**\n\n"
-            "Где создать: **ЛК WB Партнёры** → **Настройки** → **Доступ к API** → **Создать новый токен**\n\n"
-            "🛡️ **Необходимые права доступа:**\n"
-            "• Выберите категорию: **«Вопросы и отзывы»**\n"
-            "⚠️ **Важно:** Переключатель **«Только чтение»** должен быть **выключен** (иначе бот сможет читать отзывы, но не сможет публиковать на них ответы)."
+            "🔑 Введите API Токен Wildberries:\n\n"
+            "Где создать: ЛК WB Партнёры → Настройки → Доступ к API → Создать новый токен\n\n"
+            "🛡️ Необходимые права доступа: Персональный токен\n"
+            "• Выберите категорию: «Вопросы и отзывы»\n"
+            "⚠️ Важно: Переключатель «Только чтение» должен быть выключен (иначе бот сможет читать отзывы, но не сможет публиковать на них ответы)."
         )
 
 @router.message(AddShopStates.ozon_client_id)
@@ -990,13 +990,13 @@ async def process_ozon_client_id(message: Message, state: FSMContext):
     cid = message.text.strip()
     await state.update_data(ozon_client_id=cid)
     await state.set_state(AddShopStates.ozon_api_key)
-    await message.answer("🔐 **Введите API ключ Ozon:**\n\n"
-    "Где создать: **ЛК Ozon Seller** → **Настройки** → **API ключи** → **Сгенерировать ключ**\n\n"
-    "🛡️ **Какие права выбрать:**\n"
-    "• **Рекомендуется:** Роль **«Администратор»** (ключ будет работать без ограничений).\n"
-    "• **Для максимальной безопасности:** Если не хотите давать полный доступ, выберите роль с ограниченными правами:\n"
-    "   — **Отзывы (Reviews):** чтение и запись (для публикации ответов)\n"
-    "   — **Товары (Products):** только чтение (Read-only, чтобы бот видел названия и артикулы товаров)")
+    await message.answer("🔐 Введите API ключ Ozon:\n\n"
+    "Где создать: ЛК Ozon Seller → Настройки → Seller API → Сгенерировать ключ\n\n"
+    "🛡️ Какие права выбрать:\n"
+    "• Рекомендуется: Роль «Администратор» (ключ будет работать без ограничений).\n"
+    "• Для максимальной безопасности: Если не хотите давать полный доступ, выберите роль с ограниченными правами:\n"
+    "   — Отзывы (Reviews): Позволяет получать информацию и управлять отзывами на товарах\n"
+    "   — Товары (Product read-only): Позволяет получать информацию о товарах")
 
 @router.message(AddShopStates.ozon_api_key)
 async def process_ozon_api_key(message: Message, state: FSMContext):
