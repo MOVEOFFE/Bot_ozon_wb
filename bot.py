@@ -19,6 +19,8 @@ from aiogram.types import (
     KeyboardButton
 )
 
+from admin_router import admin_router
+
 from database import (
     init_db,
     get_or_create_user,
@@ -39,18 +41,15 @@ from database import (
     User
 )
 
-# Синонимы и обёртки для полной совместимости
 async def get_shop_by_id(shop_id: int):
-    # update_shop без аргументов находит и возвращает актуальный объект Shop
     return await update_shop(shop_id)
 
 get_all_running_shops = get_running_shops
+
 async def get_shop_logs(shop_id: int, limit: int = 5, offset: int = 0):
     try:
-        # Пытаемся передать оба параметра, если база поддерживает пагинацию
         return await get_recent_logs(shop_id, limit=limit, offset=offset)
     except TypeError:
-        # Если в database.py нет offset, запрашиваем записи с запасом и делаем срез в памяти
         all_logs = await get_recent_logs(shop_id, limit=offset + limit)
         return all_logs[offset:offset + limit] if all_logs else []
 
@@ -58,7 +57,6 @@ from ozon_client import OzonClient, OzonAPIError
 from wb_client import WildberriesClient, WBAPIError
 from ai_generator import DeepSeekReplyGenerator
 
-# ================= КОНФИГУРАЦИЯ =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 admin_ids_raw = os.getenv("ADMIN_IDS", "")
@@ -91,7 +89,6 @@ TONE_LABELS = {
     "expert": "Экспертный"
 }
 
-# ================= СОСТОЯНИЯ FSM =================
 class AddShopStates(StatesGroup):
     choose_marketplace = State()
     enter_name = State()
@@ -103,11 +100,7 @@ class EditSettingsStates(StatesGroup):
     edit_signature = State()
     edit_stop_words = State()
 
-class AdminStates(StatesGroup):
-    target_user_id = State()
-    add_quota_amount = State()
 
-# ================= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =================
 def is_date_fresh(date_str: str, max_days: int) -> bool:
     if not max_days or max_days == 0 or not date_str:
         return True
@@ -140,7 +133,6 @@ def get_main_menu_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
         buttons.append([KeyboardButton(text="🛡 Супер-Админка")])
     return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-# ================= ГЛАВНАЯ ПАНЕЛЬ =================
 async def get_main_dashboard_view(user_id: int) -> tuple[str, InlineKeyboardMarkup]:
     user_shops = await get_user_shops(user_id, include_archived=False)
     running_count, max_allowed = await get_running_shops_stats(user_id)
@@ -200,7 +192,6 @@ async def get_main_dashboard_view(user_id: int) -> tuple[str, InlineKeyboardMark
 
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
 
-# ================= ОЧЕРЕДИ МАРКЕТПЛЕЙСОВ =================
 async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, session_stats: dict) -> bool:
     fresh_shop = await get_shop_by_id(shop.id)
     if not fresh_shop or not fresh_shop.is_running or fresh_shop.is_archived:
@@ -264,8 +255,20 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
     if not target_reviews:
         return False
 
-    skus = [r["sku"] for r in target_reviews]
-    names = await ozon.get_product_names(skus)
+    skus = []
+    for r in target_reviews:
+        if r.get("sku"):
+            try:
+                skus.append(int(r["sku"]))
+            except (ValueError, TypeError):
+                pass
+
+    try:
+        names = await ozon.get_product_names(skus) if skus else {}
+    except Exception as e:
+        logging.error(f"[{shop.name}] Не удалось загрузить имена товаров Ozon: {e}")
+        names = {}
+
     tone = getattr(shop, "tone_style", "standard") or "standard"
     sig = shop.signature_text or f"С уважением, {shop.name}"
     replied_in_cycle = 0
@@ -281,7 +284,18 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
             return False
 
         rev_id = str(rev.get("id"))
-        p_name = names.get(rev["sku"], "наш товар")
+        raw_sku = rev.get("sku")
+
+        p_name = names.get(raw_sku) or names.get(str(raw_sku))
+        if not p_name and raw_sku is not None:
+            try:
+                p_name = names.get(int(raw_sku))
+            except (ValueError, TypeError):
+                pass
+
+        if not p_name or p_name.strip() in ["", "наш товар"]:
+            p_name = f"Товар (Ozon SKU: {raw_sku})" if raw_sku else "Товар Ozon"
+
         raw_text = (rev.get("text") or "").strip()
 
         reply = await ai.generate_reply(
@@ -362,7 +376,6 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
 
         raw_text = (f.get("text") or "").strip()
 
-        # Проверка стоп-слов (только если покупатель оставил текст)
         if raw_text:
             stops = [s.strip().lower() for s in (shop.stop_words or "").split(",") if s.strip()]
             if any(s in raw_text.lower() for s in stops):
@@ -393,11 +406,19 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
             return False
 
         fb_id = str(fb.get("id"))
-        p_name = fb.get("productDetails", {}).get("productName") or "наш товар"
+        raw_p_name = (fb.get("productDetails", {}).get("productName") or "").strip()
+        nm_id = fb.get("productDetails", {}).get("nmId") or fb.get("nmId")
+
+        if raw_p_name and raw_p_name != "наш товар":
+            p_name = raw_p_name
+        elif nm_id:
+            p_name = f"Товар (WB Артикул: {nm_id})"
+        else:
+            p_name = "Товар Wildberries"
+
         val = fb.get("productValuation") or fb.get("valuation", 5)
         raw_text = (fb.get("text") or "").strip()
 
-        # Если текста нет — подставляем маркер для ИИ, чтобы сгенерировать ответ на оценку
         effective_review_text = raw_text if raw_text else f"[Покупатель поставил оценку {val} из 5 звёзд без текстового отзыва]"
 
         reply = await ai.generate_reply(
@@ -420,7 +441,6 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
         except Exception as e:
             logging.error(f"[{shop.name}] Ошибка публикации ответа WB: {e}")
 
-        # Безопасный интервал между ответами
         if not await interruptible_sleep(20, shop.id):
             return True
 
@@ -439,7 +459,6 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
 
     return True
 
-# ================= ПАРАЛЛЕЛЬНЫЙ ВОРКЕР =================
 async def process_single_shop(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, session_stats: dict):
     try:
         mp = str(shop.marketplace or "").strip().lower()
@@ -472,12 +491,15 @@ async def background_reviews_worker(bot: Bot):
 
         await asyncio.sleep(60)
 
-# ================= ХЭНДЛЕРЫ НАВИГАЦИИ =================
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    user = await get_or_create_user(message.from_user.id)
-    is_admin = user.is_admin or message.from_user.id in ADMIN_IDS
+    is_admin = message.from_user.id in ADMIN_IDS
+    user = await get_or_create_user(
+        message.from_user.id,
+        is_admin=is_admin,
+        username=message.from_user.username
+    )
     text, kb = await get_main_dashboard_view(message.from_user.id)
     await message.answer(
         "👋 Рады приветствовать вас в **Vellio** — умном автоответчике для маркетплейсов!",
@@ -502,7 +524,12 @@ async def cb_refresh_main_dashboard(cb: CallbackQuery):
 
 @router.message(F.text == "👤 Мой профиль")
 async def nav_profile(message: Message):
-    user = await get_or_create_user(message.from_user.id)
+    is_admin = message.from_user.id in ADMIN_IDS
+    user = await get_or_create_user(
+        message.from_user.id,
+        is_admin=is_admin,
+        username=message.from_user.username
+    )
     shops = await get_user_shops(message.from_user.id, include_archived=False)
     running_count, _ = await get_running_shops_stats(message.from_user.id)
 
@@ -566,8 +593,6 @@ async def show_shops_catalog(user_id: int, message_or_cb, is_edit: bool = False)
             pass
     await message_or_cb.answer(text, reply_markup=kb, parse_mode="Markdown")
 
-# ================= КАРТОЧКА И НАСТРОЙКИ МАГАЗИНА =================
-# ==================== КАРТОЧКА И НАСТРОЙКИ МАГАЗИНА ====================
 @router.callback_query(F.data.startswith("shop_view_"))
 async def cb_shop_view(cb: CallbackQuery):
     shop_id = int(cb.data.split("_")[2])
@@ -575,26 +600,6 @@ async def cb_shop_view(cb: CallbackQuery):
     if not shop:
         await cb.answer("Магазин не найден", show_alert=True)
         return
-
-    mp = "🔵 Ozon" if shop.marketplace == "ozon" else "🟣 WB"
-    st_text = "🟢 В работе (отвечает)" if shop.is_running else "🔴 На паузе"
-    btn_toggle = "⏸ Поставить на паузу" if shop.is_running else "▶️ Запустить бота"
-    count = await get_shop_reply_count(shop.id)
-
-    stars_row = []
-    for star in [1, 2, 3, 4, 5]:
-        val = getattr(shop, f"reply_{star}_star", False)
-        icon = "✅" if val else "❌"
-        stars_row.append(InlineKeyboardButton(text=f"{icon} {star}⭐️", callback_data=f"toggle_star_{shop.id}_{star}"))
-
-    # ... здесь продолжается твой код сборки кнопок kb и строки text ...
-
-    # В САМОМ КОНЦЕ функции (после сборки text и kb):
-    try:
-        await cb.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
-    except Exception:
-        pass
-    await cb.answer("Статус обновлен")
 
     mp = "🔵 Ozon" if shop.marketplace == "ozon" else "🟣 WB"
     st_text = "🟢 В работе (отвечает)" if shop.is_running else "🔴 На паузе"
@@ -644,9 +649,9 @@ async def cb_shop_view(cb: CallbackQuery):
         f"• Стоп-слова: `{shop.stop_words or 'Нет'}`"
     )
     try:
-          await cb.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        await cb.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
     except Exception:
-         pass
+        pass
     await cb.answer("Статус обновлен")
 
 @router.callback_query(F.data.startswith("toggle_run_"))
@@ -729,7 +734,6 @@ async def cb_set_age(cb: CallbackQuery):
     await update_shop(shop_id, max_age_days=days)
     await cb.answer("Глубина проверки обновлена!")
 
-    # Безопасно клонируем CallbackQuery с новым data для Pydantic v2:
     fake_cb = cb.model_copy(update={"data": f"shop_view_{shop_id}"})
     await cb_shop_view(fake_cb)
 
@@ -829,7 +833,6 @@ async def process_new_stop_words(message: Message, state: FSMContext):
     )
     await cb_shop_view(cb_dummy)
 
-# ================= ЛОГИ ОТВЕТОВ =================
 @router.message(F.text == "💬 Ответы")
 async def nav_answers_logs(message: Message):
     shops = await get_user_shops(message.from_user.id, include_archived=False)
@@ -847,7 +850,7 @@ async def cb_show_logs(cb: CallbackQuery):
     parts = cb.data.split("_")
     shop_id = int(parts[1])
     offset = int(parts[2]) if len(parts) > 2 else 0
-    limit = 3  # Показываем по 3 отзыва, чтобы влезали полные тексты
+    limit = 3
 
     shop = await get_shop_by_id(shop_id)
     logs = await get_shop_logs(shop_id, limit=limit, offset=offset)
@@ -858,10 +861,13 @@ async def cb_show_logs(cb: CallbackQuery):
 
     text = f"📋 **История ответов: {shop.name}**\n\n"
     for log in logs:
+        clean_review = (log.review_text or "").replace("_", "\\_").replace("*", "\\*")
+        clean_reply = (log.reply_text or "").replace("_", "\\_").replace("*", "\\*")
+        
         text += (
             f"⭐️ **Оценка:** {log.rating}⭐️ | **Товар:** {log.product_name}\n"
-            f"💬 **Отзыв:** _{log.review_text}_\n\n"
-            f"🤖 **Ответ:**\n{log.reply_text}\n"
+            f"💬 **Отзыв:** _{clean_review}_\n\n"
+            f"🤖 **Ответ:**\n{clean_reply}\n"
             f"──────────────────\n"
         )
 
@@ -882,7 +888,6 @@ async def cb_show_logs(cb: CallbackQuery):
         pass
     await cb.answer()
 
-# ================= АРХИВАЦИЯ И УДАЛЕНИЕ =================
 @router.callback_query(F.data.startswith("confirm_archive_"))
 async def cb_confirm_archive(cb: CallbackQuery):
     shop_id = int(cb.data.split("_")[2])
@@ -917,7 +922,6 @@ async def cb_do_delete(cb: CallbackQuery):
     await cb.answer("Магазин успешно удален")
     await show_shops_catalog(cb.from_user.id, cb.message, is_edit=True)
 
-# ================= FSM: ПОДКЛЮЧЕНИЕ МАГАЗИНА =================
 @router.callback_query(F.data == "add_shop_start")
 async def cb_add_shop_start(cb: CallbackQuery, state: FSMContext):
     allowed, cur, max_l = await check_shop_creation_allowed(cb.from_user.id)
@@ -1037,7 +1041,6 @@ async def process_wb_token(message: Message, state: FSMContext):
     await status_msg.edit_text(f"🎉 Магазин **{name}** успешно привязан!", parse_mode="Markdown")
     await show_shops_catalog(message.from_user.id, message)
 
-# ================= МАССОВЫЕ ДЕЙСТВИЯ =================
 @router.callback_query(F.data == "pause_all_shops")
 async def cb_pause_all(cb: CallbackQuery):
     shops = await get_user_shops(cb.from_user.id, include_archived=False)
@@ -1058,7 +1061,6 @@ async def cb_resume_all(cb: CallbackQuery):
     text, kb = await get_main_dashboard_view(cb.from_user.id)
     await cb.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
 
-# ================= FAQ И АДМИНКА =================
 @router.message(F.text == "❓ Помощь и FAQ")
 @router.callback_query(F.data == "faq_menu")
 async def show_faq(event: Message | CallbackQuery):
@@ -1078,18 +1080,6 @@ async def show_faq(event: Message | CallbackQuery):
         await event.answer()
     else:
         await event.answer(faq_text, parse_mode="Markdown")
-
-@router.message(F.text == "🛡 Супер-Админка")
-async def admin_panel(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    all_running = await get_all_running_shops()
-    text = (
-        "🛡 **Панель супер-администратора:**\n\n"
-        f"⚡️ Активных магазинов в работе сейчас: **{len(all_running)} шт.**\n"
-        f"У вас полный безлимитный доступ без ограничений на тарифы и слоты."
-    )
-    await message.answer(text, parse_mode="Markdown")
 
 # ================= ТОЧКА ВХОДА =================
 async def main():
