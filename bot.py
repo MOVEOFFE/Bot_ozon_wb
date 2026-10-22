@@ -705,7 +705,10 @@ async def cb_toggle_all_stars(cb: CallbackQuery):
             reply_4_star=new_val,
             reply_5_star=new_val
         )
-    await cb_shop_view(cb)
+    
+    # Создаем фейковый callback с правильным data для экрана магазина
+    fake_cb = cb.model_copy(update={"data": f"shop_view_{shop_id}"})
+    await cb_shop_view(fake_cb)
 
 @router.callback_query(F.data.startswith("change_age_"))
 async def cb_change_age_menu(cb: CallbackQuery):
