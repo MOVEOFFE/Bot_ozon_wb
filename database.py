@@ -152,11 +152,9 @@ async def can_user_reply(user_id: int) -> bool:
         return True
     
     now = datetime.now(timezone.utc)
-    # Если подписка активна и остался лимит по тарифу
     if user.subscription_until and user.subscription_until >= now and user.replies_quota_left > 0:
         return True
     
-    # Если тариф исчерпан, но куплен дополнительный пакет
     if user.extra_replies_balance > 0:
         return True
         
@@ -175,12 +173,10 @@ async def deduct_reply_quota(user_id: int) -> bool:
             return True
 
         now = datetime.now(timezone.utc)
-        # Сначала списываем из ежемесячного тарифа
         if user.subscription_until and user.subscription_until >= now and user.replies_quota_left > 0:
             user.replies_quota_left -= 1
             await session.commit()
             return True
-        # Если в тарифе пусто, списываем из купленного разового пакета
         elif user.extra_replies_balance > 0:
             user.extra_replies_balance -= 1
             await session.commit()
@@ -433,6 +429,28 @@ async def mark_user_expiry_notified(user_id: int):
         if user:
             user.expiry_notification_sent = True
             await session.commit()
+
+
+# --- АДМИНИСТРАТИВНЫЕ ФУНКЦИИ ---
+async def get_admin_metrics() -> dict:
+    async with async_session() as session:
+        users_res = await session.execute(select(User))
+        users = list(users_res.scalars().all())
+        
+        shops_res = await session.execute(select(Shop))
+        shops = list(shops_res.scalars().all())
+        
+        logs_res = await session.execute(select(ReplyLog))
+        logs = list(logs_res.scalars().all())
+
+        active_shops_count = sum(1 for s in shops if s.is_running and not s.is_archived)
+
+        return {
+            "total_users": len(users),
+            "total_shops": len(shops),
+            "active_shops": active_shops_count,
+            "total_replies": len(logs)
+        }
 
 
 async def grant_subscription(user_id: int, plan: str, days: int) -> bool:
