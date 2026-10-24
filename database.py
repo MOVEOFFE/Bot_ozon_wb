@@ -26,8 +26,11 @@ class User(AsyncAttrs, Base):
     username = Column(String, nullable=True)
     is_admin = Column(Boolean, default=False)
     
-    plan = Column(String, default="trial")
-    replies_quota_left = Column(Integer, default=50)
+    plan = Column(String, default="trial")  # trial, start, business, pro, unlimited
+    plan_replies_limit = Column(Integer, default=50)
+    replies_quota_left = Column(Integer, default=50)      # Остаток из месячного тарифа
+    extra_replies_balance = Column(Integer, default=0)    # Купленные разовые пакеты S, M, L
+    
     subscription_until = Column(DateTime, nullable=True)
     expiry_notification_sent = Column(Boolean, default=False)
     
@@ -87,9 +90,15 @@ async def init_db():
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(users)")
             columns = [row[1] for row in cursor.fetchall()]
+            
             if "username" not in columns:
                 cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
-                conn.commit()
+            if "extra_replies_balance" not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN extra_replies_balance INTEGER DEFAULT 0")
+            if "plan_replies_limit" not in columns:
+                cursor.execute("ALTER TABLE users ADD COLUMN plan_replies_limit INTEGER DEFAULT 50")
+                
+            conn.commit()
             conn.close()
         except Exception as e:
             print(f"Migration error: {e}")
@@ -109,8 +118,11 @@ async def get_or_create_user(user_id: int, is_admin: bool = False, username: str
                 user_id=user_id,
                 username=username,
                 is_admin=is_admin, 
+                plan="unlimited" if is_admin else "trial",
+                plan_replies_limit=99999 if is_admin else 50,
                 replies_quota_left=99999 if is_admin else 50, 
-                plan="unlimited" if is_admin else "trial"
+                extra_replies_balance=0,
+                subscription_until=datetime.now(timezone.utc) + timedelta(days=7) if not is_admin else None
             )
             session.add(user)
             await session.commit()
@@ -124,6 +136,7 @@ async def get_or_create_user(user_id: int, is_admin: bool = False, username: str
                 user.is_admin = is_admin
                 if is_admin:
                     user.plan = "unlimited"
+                    user.plan_replies_limit = 99999
                     user.replies_quota_left = 99999
                 updated = True
             if updated:
@@ -131,6 +144,49 @@ async def get_or_create_user(user_id: int, is_admin: bool = False, username: str
                 await session.refresh(user)
                 
         return user
+
+
+async def can_user_reply(user_id: int) -> bool:
+    user = await get_or_create_user(user_id)
+    if user.is_admin or user.plan == "unlimited" or user_id in [590568180]:
+        return True
+    
+    now = datetime.now(timezone.utc)
+    # Если подписка активна и остался лимит по тарифу
+    if user.subscription_until and user.subscription_until >= now and user.replies_quota_left > 0:
+        return True
+    
+    # Если тариф исчерпан, но куплен дополнительный пакет
+    if user.extra_replies_balance > 0:
+        return True
+        
+    return False
+
+
+async def deduct_reply_quota(user_id: int) -> bool:
+    async with async_session() as session:
+        stmt = select(User).where(User.user_id == user_id)
+        res = await session.execute(stmt)
+        user = res.scalar_one_or_none()
+        if not user:
+            return False
+            
+        if user.is_admin or user.plan == "unlimited" or user_id in [590568180]:
+            return True
+
+        now = datetime.now(timezone.utc)
+        # Сначала списываем из ежемесячного тарифа
+        if user.subscription_until and user.subscription_until >= now and user.replies_quota_left > 0:
+            user.replies_quota_left -= 1
+            await session.commit()
+            return True
+        # Если в тарифе пусто, списываем из купленного разового пакета
+        elif user.extra_replies_balance > 0:
+            user.extra_replies_balance -= 1
+            await session.commit()
+            return True
+            
+        return False
 
 
 async def get_user_shops(user_id: int, include_archived: bool = False) -> List[Shop]:
@@ -204,13 +260,8 @@ async def unarchive_shop(user_id: int, shop_id: int) -> Tuple[bool, str]:
         user = await get_or_create_user(user_id)
         shops = await get_user_shops(user_id, include_archived=False)
         
-        max_slots = 1
-        if user.plan == "pro":
-            max_slots = 3
-        elif user.plan == "agency":
-            max_slots = 7
-        elif user.is_admin or user.plan == "unlimited":
-            max_slots = 99
+        limits = {"trial": 1, "start": 2, "business": 5, "pro": 15, "unlimited": 99}
+        max_slots = 99 if (user.is_admin or user.plan == "unlimited") else limits.get(user.plan, 1)
 
         if len(shops) >= max_slots:
             return False, f"Достигнут лимит активных магазинов по тарифу ({max_slots})."
@@ -226,10 +277,6 @@ async def delete_shop(user_id: int, shop_id: int) -> bool:
         if not shop or shop.user_id != user_id:
             return False
         
-        # Удаляем связанные логи ответов, чтобы не нарушать целостность ForeignKey
-        await session.execute(
-            select(ReplyLog).where(ReplyLog.shop_id == shop_id)
-        )
         logs_stmt = select(ReplyLog).where(ReplyLog.shop_id == shop_id)
         logs_res = await session.execute(logs_stmt)
         for log in logs_res.scalars().all():
@@ -282,7 +329,7 @@ async def check_shop_creation_allowed(user_id: int) -> Tuple[bool, int, int]:
     if user.is_admin or user.plan == "unlimited" or user_id in [590568180]:
         return True, count, 999
 
-    limits = {"trial": 1, "start": 1, "pro": 3, "agency": 7, "unlimited": 999}
+    limits = {"trial": 1, "start": 2, "business": 5, "pro": 15, "unlimited": 999}
     max_allowed = limits.get(user.plan, 1)
     return count < max_allowed, count, max_allowed
 
@@ -297,7 +344,7 @@ async def check_shop_launch_allowed(user_id: int, shop_to_launch_id: int) -> Tup
     if user.is_admin or user.plan == "unlimited" or user_id in [590568180]:
         return True, running_count, 999
 
-    limits = {"trial": 1, "start": 1, "pro": 3, "agency": 7, "unlimited": 999}
+    limits = {"trial": 1, "start": 2, "business": 5, "pro": 15, "unlimited": 999}
     max_allowed = limits.get(user.plan, 1)
     return running_count < max_allowed, running_count, max_allowed
 
@@ -310,7 +357,7 @@ async def get_running_shops_stats(user_id: int) -> Tuple[int, int]:
     if user.is_admin:
         return running_count, 99
 
-    limits = {"trial": 1, "start": 1, "pro": 3, "agency": 7}
+    limits = {"trial": 1, "start": 2, "business": 5, "pro": 15}
     return running_count, limits.get(user.plan, 1)
 
 
@@ -326,6 +373,7 @@ async def get_user_profile_data(user_id: int) -> dict:
         "is_admin": user.is_admin,
         "plan": user.plan,
         "quota_left": user.replies_quota_left,
+        "extra_balance": getattr(user, "extra_replies_balance", 0),
         "subscription_until": user.subscription_until,
         "shops_count": len(shops),
         "total_replies": total_replies
@@ -387,28 +435,6 @@ async def mark_user_expiry_notified(user_id: int):
             await session.commit()
 
 
-# --- АДМИНИСТРАТИВНЫЕ ФУНКЦИИ ---
-async def get_admin_metrics() -> dict:
-    async with async_session() as session:
-        users_res = await session.execute(select(User))
-        users = list(users_res.scalars().all())
-        
-        shops_res = await session.execute(select(Shop))
-        shops = list(shops_res.scalars().all())
-        
-        logs_res = await session.execute(select(ReplyLog))
-        logs = list(logs_res.scalars().all())
-
-        active_shops_count = sum(1 for s in shops if s.is_running and not s.is_archived)
-
-        return {
-            "total_users": len(users),
-            "total_shops": len(shops),
-            "active_shops": active_shops_count,
-            "total_replies": len(logs)
-        }
-
-
 async def grant_subscription(user_id: int, plan: str, days: int) -> bool:
     async with async_session() as session:
         stmt = select(User).where(User.user_id == user_id)
@@ -427,9 +453,25 @@ async def grant_subscription(user_id: int, plan: str, days: int) -> bool:
         user.subscription_until = base_date + timedelta(days=days)
         user.expiry_notification_sent = False
         
-        quotas = {"start": 300, "pro": 1500, "agency": 5000, "unlimited": 99999}
-        user.replies_quota_left = quotas.get(plan, 300)
+        quotas = {"start": 300, "business": 1000, "pro": 3000, "unlimited": 99999}
+        assigned_quota = quotas.get(plan, 300)
+        user.plan_replies_limit = assigned_quota
+        user.replies_quota_left = assigned_quota
 
+        await session.commit()
+        return True
+
+
+async def add_extra_replies(user_id: int, amount: int) -> bool:
+    async with async_session() as session:
+        stmt = select(User).where(User.user_id == user_id)
+        res = await session.execute(stmt)
+        user = res.scalar_one_or_none()
+        if not user:
+            return False
+
+        current_extra = getattr(user, "extra_replies_balance", 0) or 0
+        user.extra_replies_balance = current_extra + amount
         await session.commit()
         return True
 
@@ -458,6 +500,7 @@ async def get_all_users_admin() -> List[dict]:
                 "username": getattr(u, "username", None),
                 "plan": u.plan,
                 "replies_quota_left": u.replies_quota_left,
+                "extra_balance": getattr(u, "extra_replies_balance", 0),
                 "is_admin": u.is_admin,
                 "shops_count": shops_cnt,
                 "created_at": u.created_at
