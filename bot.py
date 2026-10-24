@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List
 
@@ -18,6 +19,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton
 )
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from admin_router import admin_router
 
@@ -37,6 +39,8 @@ from database import (
     get_running_shops_stats,
     check_shop_creation_allowed,
     check_shop_launch_allowed,
+    can_user_reply,
+    deduct_reply_quota,
     Shop,
     User
 )
@@ -61,6 +65,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 admin_ids_raw = os.getenv("ADMIN_IDS", "")
 ADMIN_IDS = [int(i.strip()) for i in admin_ids_raw.split(",") if i.strip().isdigit()]
+
+MANAGER_USERNAME = "vellio_help"  # Укажите ваш контакт без символа @
 
 logging.basicConfig(
     level=logging.INFO,
@@ -87,6 +93,74 @@ TONE_LABELS = {
     "formal": "Деловой / Строгий",
     "grateful": "С благодарностью",
     "expert": "Экспертный"
+}
+
+TARIFFS_INFO = {
+    "tariff_start": {
+        "title": "Тариф «Старт»",
+        "price": "990 ₽/мес",
+        "desc": (
+            "• Лимит ответов: 300 шт./месяц\n"
+            "• Слоты магазинов: до 2 шт. (WB / Ozon)\n"
+            "• Поддержка стоп-слов и индивидуальной подписи\n"
+            "• Полный доступ к аналитике и истории ответов"
+        ),
+        "ref": "start"
+    },
+    "tariff_business": {
+        "title": "Тариф «Бизнес»",
+        "price": "2 490 ₽/мес",
+        "desc": (
+            "• Лимит ответов: 1 000 шт./месяц\n"
+            "• Слоты магазинов: до 5 шт. (WB / Ozon)\n"
+            "• Допродажи (рекомендация артикулов 4-5★)\n"
+            "• Выбор стилей ответов ИИ и фильтрация по датам\n"
+            "• Приоритетная скорость генерации"
+        ),
+        "ref": "business"
+    },
+    "tariff_pro": {
+        "title": "Тариф «PRO / Агентство»",
+        "price": "4 990 ₽/мес",
+        "desc": (
+            "• Лимит ответов: 3 000 шт./месяц\n"
+            "• Слоты магазинов: до 15 шт. (WB / Ozon)\n"
+            "• Неограниченные группы рекомендаций товаров\n"
+            "• Персональная настройка промптов ИИ\n"
+            "• Выделенная линия технической поддержки"
+        ),
+        "ref": "pro"
+    },
+    "pack_s": {
+        "title": "Пакет ответов S",
+        "price": "490 ₽ (разово)",
+        "desc": (
+            "• Объем: +150 ответов к балансу\n"
+            "• Срок действия: бессрочно (не сгорают в конце месяца)\n"
+            "• Начинают расходоваться после исчерпания основного тарифа"
+        ),
+        "ref": "pack_s"
+    },
+    "pack_m": {
+        "title": "Пакет ответов M",
+        "price": "890 ₽ (разово)",
+        "desc": (
+            "• Объем: +350 ответов к балансу\n"
+            "• Срок действия: бессрочно (не сгорают в конце месяца)\n"
+            "• Оптимальный объем для распродаж и акций"
+        ),
+        "ref": "pack_m"
+    },
+    "pack_l": {
+        "title": "Пакет ответов L",
+        "price": "1 690 ₽ (разово)",
+        "desc": (
+            "• Объем: +800 ответов к балансу\n"
+            "• Срок действия: бессрочно (не сгорают в конце месяца)\n"
+            "• Максимальная выгода в пересчете на 1 отзыв"
+        ),
+        "ref": "pack_l"
+    }
 }
 
 class AddShopStates(StatesGroup):
@@ -127,7 +201,7 @@ def get_main_menu_keyboard(is_admin: bool = False) -> ReplyKeyboardMarkup:
     buttons = [
         [KeyboardButton(text="🎛 Главная панель"), KeyboardButton(text="🏪 Мои магазины")],
         [KeyboardButton(text="💬 Ответы"), KeyboardButton(text="👤 Мой профиль")],
-        [KeyboardButton(text="❓ Помощь и FAQ")]
+        [KeyboardButton(text="💳 Тарифы и подписка"), KeyboardButton(text="❓ Помощь и FAQ")]
     ]
     if is_admin:
         buttons.append([KeyboardButton(text="🛡 Супер-Админка")])
@@ -147,6 +221,7 @@ async def get_main_dashboard_view(user_id: int) -> tuple[str, InlineKeyboardMark
         )
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🏪 Перейти в Мои магазины", callback_data="goto_shops_catalog")],
+            [InlineKeyboardButton(text="💳 Тарифные планы", callback_data="tariffs_menu")],
             [InlineKeyboardButton(text="❓ Помощь и FAQ", callback_data="faq_menu")]
         ])
         return text, kb
@@ -187,7 +262,8 @@ async def get_main_dashboard_view(user_id: int) -> tuple[str, InlineKeyboardMark
         InlineKeyboardButton(text="🔄 Обновить статус", callback_data="refresh_main_dashboard")
     ])
     keyboard_rows.append([
-        InlineKeyboardButton(text="🏪 Управление магазинами", callback_data="goto_shops_catalog")
+        InlineKeyboardButton(text="🏪 Управление магазинами", callback_data="goto_shops_catalog"),
+        InlineKeyboardButton(text="💳 Тарифы", callback_data="tariffs_menu")
     ])
 
     return text, InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
@@ -281,9 +357,19 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
         if not cur_shop or not cur_shop.is_running or cur_shop.is_archived:
             return True
 
-        user = await get_or_create_user(shop.user_id)
-        if not user.is_admin and user.replies_quota_left <= 0:
+        # Проверка баланса
+        if not await can_user_reply(shop.user_id):
             await update_shop(shop.id, is_running=False)
+            try:
+                await bot.send_message(
+                    shop.user_id,
+                    f"⚠️ **Внимание!** Баланс ответов исчерпан или истекла подписка.\n"
+                    f"Магазин **{shop.name}** поставлен на паузу.\n"
+                    f"Пополните тариф в меню «💳 Тарифы и подписка».",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
             return False
 
         rev_id = str(rev.get("id"))
@@ -316,6 +402,7 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
             await ozon.publish_reply(review_id=rev_id, text=reply)
             PROCESSED_REVIEW_IDS.add(rev_id)
             await save_reply_log(shop.id, "ozon", p_name, rev["rating"], raw_text, reply)
+            await deduct_reply_quota(shop.user_id)
             replied_in_cycle += 1
             logging.info(f"[{shop.name}] Ответ Ozon опубликован на отзыв {rev_id} ({rev['rating']}⭐️)")
 
@@ -355,7 +442,6 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
 
     try:
         feedbacks = await wb.get_unprocessed_feedbacks(take=30)
-        logging.info(f"[{shop.name}] WB: Запрос выполнен успешно. Получено неотвеченных отзывов: {len(feedbacks) if feedbacks else 0}")
     except Exception as e:
         logging.error(f"[{shop.name}] Ошибка API WB при получении отзывов: {e}")
         return False
@@ -371,12 +457,10 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
             continue
 
         if shop.max_age_days > 0 and not is_date_fresh(f.get("createdDate", ""), shop.max_age_days):
-            logging.info(f"[{shop.name}] WB: Отзыв {fb_id} пропущен по дате (старше {shop.max_age_days} дн.)")
             continue
 
         val = f.get("productValuation") or f.get("valuation", 0)
         if val not in allowed_stars:
-            logging.info(f"[{shop.name}] WB: Отзыв {fb_id} пропущен (оценка {val}⭐️ отключена в фильтре)")
             continue
 
         raw_text = (f.get("text") or "").strip()
@@ -384,7 +468,6 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
         if raw_text:
             stops = [s.strip().lower() for s in (shop.stop_words or "").split(",") if s.strip()]
             if any(s in raw_text.lower() for s in stops):
-                logging.info(f"[{shop.name}] WB: Отзыв {fb_id} содержит стоп-слово, пропущен.")
                 continue
 
         target_feedbacks.append(f)
@@ -392,7 +475,6 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
             break
 
     if not target_feedbacks:
-        logging.info(f"[{shop.name}] WB: Нет подходящих отзывов под текущие фильтры.")
         return False
 
     tone = getattr(shop, "tone_style", "standard") or "standard"
@@ -404,10 +486,20 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
         if not cur_shop or not cur_shop.is_running or cur_shop.is_archived:
             return True
 
-        user = await get_or_create_user(shop.user_id)
-        if not user.is_admin and user.replies_quota_left <= 0:
+        # Проверка баланса
+        if not await can_user_reply(shop.user_id):
             logging.warning(f"[{shop.name}] У пользователя исчерпан лимит ответов.")
             await update_shop(shop.id, is_running=False)
+            try:
+                await bot.send_message(
+                    shop.user_id,
+                    f"⚠️ **Внимание!** Баланс ответов исчерпан или истекла подписка.\n"
+                    f"Магазин **{shop.name}** поставлен на паузу.\n"
+                    f"Пополните баланс в меню «💳 Тарифы и подписка».",
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
             return False
 
         fb_id = str(fb.get("id"))
@@ -441,6 +533,7 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
             await wb.publish_reply(feedback_id=fb_id, text=reply)
             PROCESSED_REVIEW_IDS.add(fb_id)
             await save_reply_log(shop.id, "wb", p_name, val, raw_text or "Без текста", reply)
+            await deduct_reply_quota(shop.user_id)
             replied_in_cycle += 1
             logging.info(f"[{shop.name}] Ответ WB опубликован на отзыв {fb_id} ({val}⭐️)")
         except Exception as e:
@@ -467,14 +560,10 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
 async def process_single_shop(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, session_stats: dict):
     try:
         mp = str(shop.marketplace or "").strip().lower()
-        logging.info(f"[{shop.name}] Воркер запустил поток магазина (ID: {shop.id}, маркетплейс: {mp})")
-
         if mp == "ozon":
             await process_ozon_queue(bot, shop, ai, session_stats)
         elif mp in ["wb", "wildberries"]:
             await process_wb_queue(bot, shop, ai, session_stats)
-        else:
-            logging.warning(f"[{shop.name}] Неизвестный маркетплейс: '{mp}'")
     except Exception as e:
         logging.error(f"Worker Error ({shop.name}): {e}")
 
@@ -496,11 +585,13 @@ async def background_reviews_worker(bot: Bot):
 
         await asyncio.sleep(60)
 
+# ================= МЕНЮ И ТАРИФЫ =================
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     is_admin = message.from_user.id in ADMIN_IDS
-    user = await get_or_create_user(
+    await get_or_create_user(
         message.from_user.id,
         is_admin=is_admin,
         username=message.from_user.username
@@ -527,6 +618,60 @@ async def cb_refresh_main_dashboard(cb: CallbackQuery):
     except Exception:
         await cb.answer()
 
+@router.message(F.text == "💳 Тарифы и подписка")
+@router.callback_query(F.data == "tariffs_menu")
+async def show_tariffs_menu(event: Message | CallbackQuery):
+    builder = InlineKeyboardBuilder()
+    
+    # Ежемесячные тарифы
+    builder.button(text="🔹 Тариф «Старт» — 990 ₽/мес", callback_data="tariff_start")
+    builder.button(text="🔥 Тариф «Бизнес» — 2 490 ₽/мес", callback_data="tariff_business")
+    builder.button(text="⚡️ Тариф «PRO» — 4 990 ₽/мес", callback_data="tariff_pro")
+    
+    # Разовые пакеты ответов
+    builder.button(text="📦 Пакет S (+150 ответов) — 490 ₽", callback_data="pack_s")
+    builder.button(text="📦 Пакет M (+350 ответов) — 890 ₽", callback_data="pack_m")
+    builder.button(text="📦 Пакет L (+800 ответов) — 1 690 ₽", callback_data="pack_l")
+    
+    builder.adjust(1)
+    
+    text = (
+        "💳 **Тарифные планы и баланс Vellio**\n\n"
+        "Выберите ежемесячную подписку или докупите разовый пакет ответов.\n\n"
+        "✨ **Все ответы генерируются нейросетью DeepSeek** с учетом оценки, тональности и стоп-слов.\n"
+        "⚡️ В тарифах «Бизнес» и «PRO» доступны авто-рекомендации сопутствующих артикулов в ответах 4-5⭐️."
+    )
+    
+    if isinstance(event, CallbackQuery):
+        await event.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+        await event.answer()
+    else:
+        await event.answer(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+@router.callback_query(F.data.in_(TARIFFS_INFO.keys()))
+async def show_tariff_detail(cb: CallbackQuery):
+    item = TARIFFS_INFO[cb.data]
+    user_id = cb.from_user.id
+    
+    order_msg = f"Здравствуйте! Хочу оформить {item['title']} ({item['price']}). Мой Telegram ID: {user_id}"
+    encoded_msg = urllib.parse.quote(order_msg)
+    manager_url = f"https://t.me/{MANAGER_USERNAME}?text={encoded_msg}"
+    
+    builder = InlineKeyboardBuilder()
+    builder.button(text=f"💳 Оплатить {item['price']}", url=manager_url)
+    builder.button(text="◀️ Назад к тарифам", callback_data="tariffs_menu")
+    builder.adjust(1)
+    
+    text = (
+        f"🏷 **{item['title']}**\n\n"
+        f"💰 **Стоимость:** `{item['price']}`\n\n"
+        f"📋 **В тариф входит:**\n{item['desc']}\n\n"
+        f"_Для оплаты нажмите кнопку ниже. Менеджер сформирует ссылку/QR для быстрой оплаты через СБП и сразу активирует доступ._"
+    )
+    
+    await cb.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+    await cb.answer()
+
 @router.message(F.text == "👤 Мой профиль")
 async def nav_profile(message: Message):
     is_admin = message.from_user.id in ADMIN_IDS
@@ -542,20 +687,41 @@ async def nav_profile(message: Message):
     for s in shops:
         total_replies += await get_shop_reply_count(s.id)
 
-    plan_label = "👑 Безлимит" if user.plan == "unlimited" or user.is_admin else user.plan.capitalize()
-    quota_label = "Безлимитно" if user.is_admin or user.plan == "unlimited" else f"{user.replies_quota_left} шт."
+    plan_names = {
+        "trial": "Пробный (7 дней)",
+        "start": "Старт",
+        "business": "Бизнес",
+        "pro": "PRO",
+        "unlimited": "👑 Безлимит"
+    }
+    plan_label = plan_names.get(user.plan, user.plan.capitalize())
+    
+    if user.is_admin or user.plan == "unlimited":
+        sub_until_str = "Бессрочно"
+        quota_label = "Безлимитно"
+    else:
+        if user.subscription_until:
+            sub_until_str = user.subscription_until.strftime("%d.%m.%Y")
+        else:
+            sub_until_str = "Истекла"
+        extra = getattr(user, "extra_replies_balance", 0) or 0
+        quota_label = f"{user.replies_quota_left} шт. (по тарифу) + {extra} шт. (пакеты)"
 
     text = (
         "👤 **Личный кабинет селлера**\n\n"
         f"🆔 **Ваш ID:** `{message.from_user.id}`\n"
         f"📦 **Текущий тариф:** {plan_label}\n"
-        f"⏳ **Срок действия:** Не ограничен\n"
+        f"⏳ **Действует до:** `{sub_until_str}`\n"
         f"💬 **Остаток ответов:** {quota_label}\n\n"
         f"🏪 **Активных магазинов:** {len(shops)} шт.\n"
         f"⚡️ **Магазинов в работе:** {running_count} шт.\n"
         f"🚀 **Всего ответов бота:** {total_replies} шт."
     )
-    await message.answer(text, parse_mode="Markdown")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Продлить или сменить тариф", callback_data="tariffs_menu")]
+    ])
+    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
 
 @router.message(F.text == "🏪 Мои магазины")
 async def nav_shops(message: Message, state: FSMContext):
@@ -706,7 +872,6 @@ async def cb_toggle_all_stars(cb: CallbackQuery):
             reply_5_star=new_val
         )
     
-    # Создаем фейковый callback с правильным data для экрана магазина
     fake_cb = cb.model_copy(update={"data": f"shop_view_{shop_id}"})
     await cb_shop_view(fake_cb)
 
@@ -927,7 +1092,6 @@ async def cb_confirm_delete(cb: CallbackQuery):
 @router.callback_query(F.data.startswith("do_delete_"))
 async def cb_do_delete(cb: CallbackQuery):
     shop_id = int(cb.data.split("_")[2])
-    # Передаем и user_id, и shop_id:
     await delete_shop(user_id=cb.from_user.id, shop_id=shop_id)
     await cb.answer("Магазин успешно удален")
     await show_shops_catalog(cb.from_user.id, cb.message, is_edit=True)
@@ -985,7 +1149,7 @@ async def process_shop_name(message: Message, state: FSMContext):
             "Где создать: ЛК WB Партнёры → Настройки → Доступ к API → Создать новый токен\n\n"
             "🛡️ Необходимые права доступа: Персональный токен\n"
             "• Выберите категорию: «Вопросы и отзывы»\n"
-            "⚠️ Важно: Переключатель «Только чтение» должен быть выключен (иначе бот сможет читать отзывы, но не сможет публиковать на них ответы)."
+            "⚠️ Важно: Переключатель «Только чтение» должен быть выключен."
         )
 
 @router.message(AddShopStates.ozon_client_id)
@@ -996,10 +1160,8 @@ async def process_ozon_client_id(message: Message, state: FSMContext):
     await message.answer("🔐 Введите API ключ Ozon:\n\n"
     "Где создать: ЛК Ozon Seller → Настройки → Seller API → Сгенерировать ключ\n\n"
     "🛡️ Какие права выбрать:\n"
-    "• Рекомендуется: Роль «Администратор» (ключ будет работать без ограничений).\n"
-    "• Для максимальной безопасности: Если не хотите давать полный доступ, выберите роль с ограниченными правами:\n"
-    "   — Отзывы (Reviews): Позволяет получать информацию и управлять отзывами на товарах\n"
-    "   — Товары (Product read-only): Позволяет получать информацию о товарах")
+    "• Рекомендуется: Роль «Администратор»\n"
+    "• Для максимальной безопасности: Отзывы (Reviews) + Товары (Product read-only)")
 
 @router.message(AddShopStates.ozon_api_key)
 async def process_ozon_api_key(message: Message, state: FSMContext):
@@ -1016,7 +1178,7 @@ async def process_ozon_api_key(message: Message, state: FSMContext):
         await status_msg.edit_text(f"❌ Ошибка валидации ключей Ozon: {err}\nПопробуйте снова или нажмите /start.")
         return
 
-    shop = await create_shop(
+    await create_shop(
         user_id=message.from_user.id,
         marketplace="ozon",
         name=name,
@@ -1041,7 +1203,7 @@ async def process_wb_token(message: Message, state: FSMContext):
         await status_msg.edit_text(f"❌ Ошибка валидации токена WB: {err}\nПопробуйте снова или нажмите /start.")
         return
 
-    shop = await create_shop(
+    await create_shop(
         user_id=message.from_user.id,
         marketplace="wildberries",
         name=name,
@@ -1077,13 +1239,13 @@ async def show_faq(event: Message | CallbackQuery):
     faq_text = (
         "❓ **Часто задаваемые вопросы (FAQ):**\n\n"
         "**1. Как бот отвечает на отзывы?**\n"
-        "Бот с помощью ИИ DeepSeek анализирует оценку, текст покупателя, вложения и генерирует персонализированный вежливый ответ с вашей подписью.\n\n"
+        "Бот с помощью нейросети DeepSeek анализирует оценку, текст покупателя и генерирует естественный вежливый ответ с вашей подписью.\n\n"
         "**2. Не заблокирует ли меня маркетплейс?**\n"
-        "Нет. Все запросы выполняются строго через официальный API Ozon Seller и Wildberries OpenAPI с безопасными интервалами.\n\n"
+        "Нет. Все запросы выполняются через официальные API Ozon Seller и Wildberries OpenAPI с безопасными задержками.\n\n"
         "**3. Что такое глубина проверки?**\n"
-        "Это период в прошлое (от 1 дня до «За все время»), в пределах которого бот ищет неотвеченные отзывы.\n\n"
+        "Это период в прошлое (от 1 дня до «За все время»), за который бот ищет неотвеченные отзывы.\n\n"
         "**4. Как настроить стоп-слова?**\n"
-        "В настройках магазина укажите слова через запятую. Отзывы с такими словами бот оставит вам для ручного ответа."
+        "В настройках магазина укажите слова через запятую. Отзывы с такими словами бот пропустит для вашего ручного ответа."
     )
     if isinstance(event, CallbackQuery):
         await event.message.answer(faq_text, parse_mode="Markdown")
