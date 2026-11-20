@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "dbhub": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@bytebase/dbhub",
+        "--dsn",
+        "sqlite:///C:/Users/KK/Desktop/getvellio_bot/vellio_bot.db",
+        "--readonly"
+      ],
+      "enabled": true
+    }
+  }
+}
