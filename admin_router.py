@@ -15,6 +15,7 @@ from database import (
     get_admin_metrics,
     grant_subscription,
     get_all_user_ids,
+    get_users_page,
     create_promo_code,
     create_consistent_db_backup,
     PLAN_QUOTAS,
@@ -27,6 +28,7 @@ def is_admin(user_id: int) -> bool:
 
 admin_router = Router()
 _broadcast_lock = asyncio.Lock()
+PAGE_SIZE = 10
 MENU_TEXTS = {"🎛 Главная панель", "🏪 Мои магазины", "💬 Ответы", "👤 Мой профиль", "❓ Помощь и FAQ", "💳 Тарифы", "🛡 Супер-Админка"}
 
 
@@ -48,6 +50,7 @@ def _build_admin_dashboard(metrics: dict) -> tuple[str, InlineKeyboardMarkup]:
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
             [InlineKeyboardButton(text="💳 Выдать подписку", callback_data="admin_grant_sub")],
             [InlineKeyboardButton(text="🎟 Создать промокод", callback_data="admin_create_promo")],
             [InlineKeyboardButton(text="📢 Рассылка пользователям", callback_data="admin_broadcast")],
@@ -59,6 +62,52 @@ def _build_admin_dashboard(metrics: dict) -> tuple[str, InlineKeyboardMarkup]:
     return text, kb
 
 
+def _build_users_page(users, total, offset, shop_counts):
+    page = offset // PAGE_SIZE + 1
+    total_pages = max(1, -(-total // PAGE_SIZE))
+    lines = [f"👥 <b>Пользователи</b> ({total} чел.) — стр. {page}/{total_pages}\n"]
+    for idx, u in enumerate(users, start=offset + 1):
+        name = " ".join(p for p in (u.first_name, u.last_name) if p) or "—"
+        uname = f"@{u.username}" if u.username else "—"
+        shops = shop_counts.get(u.user_id, 0)
+        if u.is_admin or u.plan == "unlimited":
+            plan = "👑 Безлимит"
+            quota = "∞"
+        else:
+            plan = (u.plan or "trial").capitalize()
+            quota = str(u.replies_quota_left or 0)
+        created = u.created_at.strftime("%d.%m.%Y") if u.created_at else "—"
+        lines.append(
+            f"{idx}. {html.escape(name)} ({html.escape(uname)})\n"
+            f"   ID: <code>{u.user_id}</code> | 🏪 {shops} | {html.escape(plan)} ({quota}) | 📅 {created}"
+        )
+    text = "\n".join(lines)
+
+    buttons = []
+    for u in users:
+        name = " ".join(p for p in (u.first_name, u.last_name) if p).strip()
+        if name and u.username:
+            label = f"{name} (@{u.username})"
+        elif name:
+            label = name
+        elif u.username:
+            label = f"@{u.username}"
+        else:
+            label = f"ID {u.user_id}"
+        url = f"https://t.me/{u.username}" if u.username else f"tg://user?id={u.user_id}"
+        buttons.append([InlineKeyboardButton(text=f"💬 {label}", url=url)])
+
+    nav = []
+    if offset > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"admin_users_page:{offset - PAGE_SIZE}"))
+    if offset + PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"admin_users_page:{offset + PAGE_SIZE}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="🔙 В админку", callback_data="admin_refresh_metrics")])
+    return text, InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @admin_router.message(F.text == "🛡 Супер-Админка")
 async def btn_admin_panel(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
@@ -67,6 +116,40 @@ async def btn_admin_panel(message: Message, state: FSMContext):
     metrics = await get_admin_metrics()
     text, kb = _build_admin_dashboard(metrics)
     await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
+@admin_router.callback_query(F.data == "admin_users")
+async def cb_admin_users(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer()
+        return
+    await state.clear()
+    users, total, counts = await get_users_page(0, PAGE_SIZE)
+    text, kb = _build_users_page(users, total, 0, counts)
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.message.answer(text, reply_markup=kb, parse_mode="HTML")
+    await call.answer()
+
+
+@admin_router.callback_query(F.data.startswith("admin_users_page:"))
+async def cb_admin_users_page(call: CallbackQuery, state: FSMContext):
+    if not is_admin(call.from_user.id):
+        await call.answer()
+        return
+    try:
+        offset = int(call.data.split(":", 1)[1])
+    except ValueError:
+        await call.answer()
+        return
+    users, total, counts = await get_users_page(offset, PAGE_SIZE)
+    text, kb = _build_users_page(users, total, offset, counts)
+    try:
+        await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    except Exception:
+        await call.answer()
+    await call.answer()
 
 
 @admin_router.callback_query(F.data == "admin_refresh_metrics")

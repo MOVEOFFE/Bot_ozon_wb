@@ -164,6 +164,9 @@ class User(AsyncAttrs, Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(BigInteger, unique=True, index=True, nullable=False)
     is_admin = Column(Boolean, default=False)
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
+    username = Column(String, nullable=True)
 
     plan = Column(String, default="trial")
     replies_quota_left = Column(Integer, default=50)
@@ -204,6 +207,7 @@ class Shop(AsyncAttrs, Base):
     custom_instructions = Column(Text, nullable=True)
     moderate_negative = Column(Boolean, default=False)
     notify_cycle_summary = Column(Boolean, default=False)
+    all_caught_up_notified = Column(Boolean, default=False)
     error_streak = Column(Integer, default=0)
     last_error_text = Column(String, nullable=True)
 
@@ -504,6 +508,22 @@ async def get_or_create_user(user_id: int, is_admin: Optional[bool] = None) -> U
         return user
 
 
+async def update_user_profile(user_id: int, first_name=None, last_name=None, username=None):
+    async with async_session() as session:
+        user = (
+            await session.execute(select(User).where(User.user_id == user_id))
+        ).scalar_one_or_none()
+        if not user:
+            return
+        if first_name is not None and user.first_name != first_name:
+            user.first_name = first_name
+        if last_name is not None and user.last_name != last_name:
+            user.last_name = last_name
+        if username is not None and user.username != username:
+            user.username = username
+        await session.commit()
+
+
 async def get_user_shops(user_id: int, include_archived: bool = False) -> List[Shop]:
     async with async_session() as session:
         if include_archived:
@@ -741,6 +761,14 @@ async def get_shop_reply_count(shop_id: int) -> int:
         stmt = select(func.count(ReplyLog.id)).where(ReplyLog.shop_id == shop_id)
         result = await session.execute(stmt)
         return int(result.scalar_one() or 0)
+
+
+async def set_shop_all_caught_up(shop_id: int, value: bool):
+    async with async_session() as session:
+        shop = await session.get(Shop, shop_id)
+        if shop:
+            shop.all_caught_up_notified = value
+            await session.commit()
 
 
 async def decrement_user_quota(user_id: int, amount: int = 1) -> Optional[int]:
@@ -1040,6 +1068,30 @@ async def get_all_user_ids() -> List[int]:
         stmt = select(User.user_id)
         res = await session.execute(stmt)
         return [row[0] for row in res.all()]
+
+
+async def get_users_page(offset: int = 0, limit: int = 10):
+    async with async_session() as session:
+        total = (await session.execute(select(func.count(User.id)))).scalar_one() or 0
+        users = list(
+            (
+                await session.execute(
+                    select(User).order_by(User.id.asc()).offset(max(0, offset)).limit(max(1, limit))
+                )
+            ).scalars().all()
+        )
+        shop_counts = {}
+        uids = [u.user_id for u in users]
+        if uids:
+            rows = (
+                await session.execute(
+                    select(Shop.user_id, func.count(Shop.id))
+                    .where(Shop.user_id.in_(uids), Shop.is_archived == False)
+                    .group_by(Shop.user_id)
+                )
+            ).all()
+            shop_counts = {uid: int(cnt) for uid, cnt in rows}
+        return users, int(total), shop_counts
 
 
 # --- МОДЕРАЦИЯ ОТЗЫВОВ (премодерация) ---

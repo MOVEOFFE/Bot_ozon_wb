@@ -69,11 +69,13 @@ from database import (
     record_published_reply,
     release_reply_quota,
     reserve_reply_quota,
+    set_shop_all_caught_up,
     update_pending_approval,
     update_pending_payment,
     update_pending_payment_conditional,
     unarchive_shop,
     update_shop,
+    update_user_profile,
     use_promo_code,
     _get_fernet,
     create_consistent_db_backup,
@@ -576,6 +578,19 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
         f"(звёзды: {allowed_stars}, глубина: {shop.max_age_days} дн.)"
     )
     if not target_reviews:
+        if shop.notify_cycle_summary and not shop.all_caught_up_notified:
+            await set_shop_all_caught_up(shop.id, True)
+            try:
+                await bot.send_message(
+                    shop.user_id,
+                    "✅ <b>Все отзывы отвечены!</b>\n\n"
+                    f"🏪 Магазин: <b>[🔵 Ozon] {escape(shop.name)}</b>\n"
+                    f"📅 Глубина: последние <b>{shop.max_age_days} дн.</b>\n\n"
+                    "Бот продолжит следить за магазином и автоматически ответит на новые отзывы с теми же настройками. Можно отдыхать 😴",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
         return False
 
     skus = [review.get("sku") for review in target_reviews if review.get("sku") is not None]
@@ -701,17 +716,8 @@ async def process_ozon_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, s
         if not await interruptible_sleep(45, shop.id):
             return True
 
-    if replied_in_cycle > 0 and shop.notify_cycle_summary:
-        try:
-            await bot.send_message(
-                shop.user_id,
-                "✅ <b>Цикл обработки завершён.</b>\n\n"
-                f"🏪 Магазин: <b>[🔵 Ozon] {escape(shop.name)}</b>\n"
-                f"💬 Отвечено за сеанс: <b>{replied_in_cycle} шт.</b>",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+    if replied_in_cycle > 0 and shop.all_caught_up_notified:
+        await set_shop_all_caught_up(shop.id, False)
     return True
 
 
@@ -786,6 +792,19 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
         f"(звёзды: {allowed_stars}, глубина: {shop.max_age_days} дн.)"
     )
     if not target_feedbacks:
+        if shop.notify_cycle_summary and not shop.all_caught_up_notified:
+            await set_shop_all_caught_up(shop.id, True)
+            try:
+                await bot.send_message(
+                    shop.user_id,
+                    "✅ <b>Все отзывы отвечены!</b>\n\n"
+                    f"🏪 Магазин: <b>[🟣 WB] {escape(shop.name)}</b>\n"
+                    f"📅 Глубина: последние <b>{shop.max_age_days} дн.</b>\n\n"
+                    "Бот продолжит следить за магазином и автоматически ответит на новые отзывы с теми же настройками. Можно отдыхать 😴",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
         return False
 
     tone = shop.tone_style or "standard"
@@ -902,17 +921,8 @@ async def process_wb_queue(bot: Bot, shop: Shop, ai: DeepSeekReplyGenerator, ses
         if not await interruptible_sleep(20, shop.id):
             return True
 
-    if replied_in_cycle > 0 and shop.notify_cycle_summary:
-        try:
-            await bot.send_message(
-                shop.user_id,
-                "✅ <b>Цикл обработки завершён.</b>\n\n"
-                f"🏪 Магазин: <b>[🟣 WB] {escape(shop.name)}</b>\n"
-                f"💬 Отвечено за сеанс: <b>{replied_in_cycle} шт.</b>",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+    if replied_in_cycle > 0 and shop.all_caught_up_notified:
+        await set_shop_all_caught_up(shop.id, False)
     return True
 
 
@@ -1053,6 +1063,12 @@ async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     is_new = await get_user(message.from_user.id) is None
     user = await get_or_create_user(message.from_user.id)
+    await update_user_profile(
+        message.from_user.id,
+        message.from_user.first_name,
+        message.from_user.last_name,
+        message.from_user.username,
+    )
     if is_new:
         username = f" (@{message.from_user.username})" if message.from_user.username else ""
         await notify_admins(message.bot, f"🆕 Новый пользователь: {message.from_user.id}{username}")
@@ -1086,6 +1102,12 @@ async def cb_refresh_main_dashboard(call: CallbackQuery):
 async def nav_profile(message: Message, state: FSMContext):
     await state.clear()
     user = await get_or_create_user(message.from_user.id)
+    await update_user_profile(
+        message.from_user.id,
+        message.from_user.first_name,
+        message.from_user.last_name,
+        message.from_user.username,
+    )
     shops = await get_user_shops(message.from_user.id, include_archived=False)
     running_count, _ = await get_running_shops_stats(message.from_user.id)
 
@@ -1249,7 +1271,7 @@ async def build_shop_view(shop: Shop) -> tuple[str, InlineKeyboardMarkup]:
                 InlineKeyboardButton(text="🧠 Доп. инструкции для ИИ", callback_data=f"edit_instr_{shop.id}"),
                 InlineKeyboardButton(text=f"🛡 Премодерация 1-3★: {moderation_label}", callback_data=f"toggle_moderation_{shop.id}"),
             ],
-            [InlineKeyboardButton(text=f"🔔 Отчёты циклов: {'ВКЛ' if shop.notify_cycle_summary else 'ВЫКЛ'}", callback_data=f"toggle_cycle_notify_{shop.id}")],
+            [InlineKeyboardButton(text=f"🔔 Уведомление «всё отвечено»: {'ВКЛ' if shop.notify_cycle_summary else 'ВЫКЛ'}", callback_data=f"toggle_cycle_notify_{shop.id}")],
             [
                 InlineKeyboardButton(text="📋 Логи ответов", callback_data=f"logs_{shop.id}_0"),
                 InlineKeyboardButton(text="🔄 Обновить", callback_data=f"shop_view_{shop.id}"),
